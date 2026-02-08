@@ -16,32 +16,36 @@ from streamlit.web.server.websocket_headers import _get_websocket_headers
 # 1. CẤU HÌNH & HÀM HỖ TRỢ
 # ==========================================
 st.set_page_config(
-    page_title="Hệ Thống Lấy Link Address Bar V10.1",
+    page_title="Hệ Thống Admin V11 (WAL)",
     page_icon="💎",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# Tạo khóa để tránh xung đột Database khi nhiều người dùng
+# Khóa luồng để xử lý tranh chấp
 db_lock = threading.Lock()
 
 # --- TRACKING ---
 def get_remote_ip():
     try:
-        headers = _get_websocket_headers()
+        # Thử lấy headers theo cách mới hoặc cũ để tránh warning
+        try:
+            headers = st.context.headers
+        except:
+            headers = _get_websocket_headers()
+            
         if "X-Forwarded-For" in headers: return headers["X-Forwarded-For"].split(",")[0]
         return headers.get("Remote-Addr", "Unknown")
     except: return "Unknown"
 
 def get_user_agent():
     try:
-        headers = _get_websocket_headers()
+        try:
+            headers = st.context.headers
+        except:
+            headers = _get_websocket_headers()
         ua = headers.get("User-Agent", "Unknown")
-        if "iPhone" in ua: return "iPhone"
-        elif "Android" in ua: return "Android Mobile"
-        elif "Windows" in ua: return "Windows PC"
-        elif "Macintosh" in ua: return "Macbook"
-        return "Other Device"
+        return ua if ua else "Unknown Device"
     except: return "Unknown Device"
 
 def get_location_from_ip(ip):
@@ -53,12 +57,20 @@ def get_location_from_ip(ip):
     return "Unknown", "Unknown"
 
 # ==========================================
-# 2. DATABASE (SQLITE)
+# 2. DATABASE (SQLITE - WAL MODE)
 # ==========================================
-DB_NAME = 'data_final_v10_fix.db'
+# Đổi tên DB để áp dụng chế độ mới
+DB_NAME = 'data_v11_wal_mode.db'
 
 def get_db_connection():
-    return sqlite3.connect(DB_NAME, check_same_thread=False)
+    # timeout=30: Đợi 30s nếu DB đang bận thay vì lỗi ngay
+    conn = sqlite3.connect(DB_NAME, timeout=30, check_same_thread=False)
+    # Bật chế độ WAL (Write-Ahead Logging) để tránh Lock
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except:
+        pass
+    return conn
 
 def init_db():
     with db_lock:
@@ -170,7 +182,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 4. CORE LOGIC V9.0 (UPDATE CHO LINK GROUP)
+# 4. CORE LOGIC (LINK CLEANER)
 # ==========================================
 def resolve_link_logic(input_str):
     input_str = str(input_str).strip()
@@ -237,7 +249,7 @@ if 'role' not in st.session_state: st.session_state['role'] = ''
 
 # --- LOGIN ---
 if not st.session_state['logged_in']:
-    st.title("🔐 Đăng Nhập Hệ Thống V10.1")
+    st.title("🔐 Đăng Nhập")
     c1, c2 = st.columns(2)
     with c1:
         u = st.text_input("Tài khoản")
@@ -257,7 +269,7 @@ else:
         if st.button("🚪 Đăng Xuất"):
             st.session_state['logged_in'] = False; st.rerun()
 
-    st.title("💎 Hệ Thống Lấy Link Chuẩn (Address Bar)")
+    st.title("💎 Hệ Thống Lấy Link Chuẩn")
 
     if st.session_state['role'] == 'admin':
         tabs = st.tabs(["🚀 TOOL ĐỔI LINK", "📂 KHO BÁO CÁO", "📊 QUẢN TRỊ ADMIN"])
@@ -289,7 +301,7 @@ else:
             if in_lines:
                 tot = len(in_lines)
                 log_history(st.session_state['username'], "Chạy Tool", tot)
-                st.toast(f"Đang giả lập trình duyệt lấy {tot} link...", icon="🚀")
+                st.toast(f"Đang xử lý {tot} link...", icon="🚀")
                 prog = st.progress(0); stt = st.empty(); res = [None]*tot
                 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=20) as exc:
@@ -306,7 +318,8 @@ else:
         if st.session_state['data']:
             df_r = pd.DataFrame(st.session_state['data'])
             if 'Link Address Bar' not in df_r.columns: df_r['Link Address Bar'] = []
-            st.data_editor(df_r, column_config={"Link Address Bar": st.column_config.LinkColumn("Link Address Bar", display_text=None)}, use_container_width=True)
+            # Cấu hình width="stretch" để tránh warning deprecated
+            st.data_editor(df_r, column_config={"Link Address Bar": st.column_config.LinkColumn("Link Address Bar", display_text=None)}, width=None, use_container_width=True)
             
             out = BytesIO(); fn = "ket_qua.xlsx"
             if st.session_state.get('in_type') == 'file' and st.session_state.get('f_name', '').endswith('.xlsx'):
@@ -345,22 +358,24 @@ else:
             subs = get_submissions(sel_u)
             if subs:
                 df_s = pd.DataFrame(subs, columns=["ID", "User", "Link", "Note", "Time", "IP", "Dev", "Loc", "Stat"])
+                # Sửa warning width
                 st.data_editor(df_s[["User", "Link", "Note", "Time", "Loc"]], column_config={"Link": st.column_config.LinkColumn("Link", display_text="🔗 Mở")}, use_container_width=True)
 
         with tabs[2]:
             st.subheader("📊 Quản Trị")
-            # --- PHẦN TẠO USER ĐÃ ĐƯỢC SỬA LỖI ---
-            with st.expander("Thêm/Xóa User", expanded=True):
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.write("➕ **Thêm Mới**")
+            # --- FORM TẠO USER ---
+            c1, c2 = st.columns(2)
+            with c1:
+                st.write("➕ **Thêm Mới**")
+                with st.form("create_user_form", clear_on_submit=True):
                     ua = st.text_input("Tên đăng nhập mới")
                     pa = st.text_input("Mật khẩu mới", type="password")
                     ra = st.selectbox("Quyền", ["user", "admin"])
+                    submitted = st.form_submit_button("Tạo Tài Khoản")
                     
-                    if st.button("Tạo Tài Khoản"):
+                    if submitted:
                         if not ua or not pa:
-                            st.warning("⚠️ Vui lòng điền đủ Tên và Mật khẩu!")
+                            st.error("⚠️ Điền thiếu thông tin!")
                         else:
                             success, msg = add_user(ua, make_hashes(pa), ra)
                             if success:
@@ -369,12 +384,14 @@ else:
                                 st.rerun()
                             else:
                                 st.error(f"❌ Lỗi: {msg}")
-                
-                with c2:
-                    st.write("❌ **Xóa User**")
-                    users_list = [u[0] for u in get_all_users()]
-                    ud = st.selectbox("Chọn User để xóa", users_list)
-                    if st.button("Xóa Ngay"):
+            
+            with c2:
+                st.write("❌ **Xóa User**")
+                users_list = [u[0] for u in get_all_users()]
+                with st.form("delete_user_form"):
+                    ud = st.selectbox("Chọn User xóa", users_list)
+                    del_submitted = st.form_submit_button("Xóa Ngay")
+                    if del_submitted:
                         delete_user_db(ud)
                         st.success(f"Đã xóa {ud}")
                         time.sleep(1)
