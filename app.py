@@ -51,8 +51,7 @@ def get_location_from_ip(ip):
 # ==========================================
 # 2. DATABASE (SQLITE)
 # ==========================================
-conn = sqlite3.connect('data_v9_final.db', check_same_thread=False)
-c = conn.cursor()
+conn = sqlite3.connect('data_v9_final_fix.db', check_same_thread=False)c = conn.cursor()
 
 def init_db():
     c.execute('CREATE TABLE IF NOT EXISTS users(username TEXT PRIMARY KEY, password TEXT, role TEXT)')
