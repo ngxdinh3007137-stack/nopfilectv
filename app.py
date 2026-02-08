@@ -17,7 +17,7 @@ from streamlit.web.server.websocket_headers import _get_websocket_headers
 # 1. CẤU HÌNH & CSS (GIAO DIỆN PC/MOBILE)
 # ==========================================
 st.set_page_config(
-    page_title="Hệ Thống Xử Lý Link V14",
+    page_title="Hệ Thống Xử Lý Link FB",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
