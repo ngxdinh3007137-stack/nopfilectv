@@ -8,7 +8,7 @@ import hashlib
 import concurrent.futures
 from io import BytesIO
 from datetime import datetime
-from urllib.parse import unquote, urlparse, parse_qs
+from urllib.parse import unquote, urlparse, parse_qs, urlencode
 from streamlit.web.server.websocket_headers import _get_websocket_headers
 
 # ==========================================
@@ -24,6 +24,8 @@ st.set_page_config(
 # --- TRACKING ---
 def get_remote_ip():
     try:
+        # Note: _get_websocket_headers is deprecated but used here as per original code.
+        # Ideally, use st.context.headers in newer Streamlit versions if available.
         headers = _get_websocket_headers()
         if "X-Forwarded-For" in headers: return headers["X-Forwarded-For"].split(",")[0]
         return headers.get("Remote-Addr", "Unknown")
@@ -51,9 +53,17 @@ def get_location_from_ip(ip):
 # ==========================================
 # 2. DATABASE (SQLITE)
 # ==========================================
-conn = sqlite3.connect('data_v9_final_fix.db', check_same_thread=False)c = conn.cursor()
+# DB_NAME = 'data_v9_final_fix.db'
+DB_NAME = 'data_v9_final_fix_v2.db' # Changed name to ensure fresh DB structure if needed
+
+def get_db_connection():
+    """Create a new database connection."""
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    return conn
 
 def init_db():
+    conn = get_db_connection()
+    c = conn.cursor()
     c.execute('CREATE TABLE IF NOT EXISTS users(username TEXT PRIMARY KEY, password TEXT, role TEXT)')
     c.execute('''CREATE TABLE IF NOT EXISTS submissions(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,40 +73,86 @@ def init_db():
         username TEXT, action TEXT, count INTEGER, timestamp TEXT, 
         ip TEXT, device TEXT, city TEXT, country TEXT, lat REAL, lon REAL)''')
     conn.commit()
+    conn.close()
 
 def add_user(u, p, r):
-    try: c.execute('INSERT INTO users VALUES (?,?,?)', (u, p, r)); conn.commit(); return True
-    except: return False
+    try: 
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('INSERT INTO users VALUES (?,?,?)', (u, p, r))
+        conn.commit()
+        conn.close()
+        return True
+    except: 
+        return False
 
 def login(u, p):
+    conn = get_db_connection()
+    c = conn.cursor()
     c.execute('SELECT * FROM users WHERE username=? AND password=?', (u, p))
-    return c.fetchall()
+    data = c.fetchall()
+    conn.close()
+    return data
 
 def submit_report(u, l, n):
     ip = get_remote_ip(); ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     dev = get_user_agent(); city, country = get_location_from_ip(ip)
+    
+    conn = get_db_connection()
+    c = conn.cursor()
     c.execute('INSERT INTO submissions (username, report_link, note, timestamp, ip, device, location, status) VALUES (?,?,?,?,?,?,?,?)',
-              (u, l, n, ts, ip, dev, f"{city}-{country}", "Active")); conn.commit()
+              (u, l, n, ts, ip, dev, f"{city}-{country}", "Active"))
+    conn.commit()
+    conn.close()
 
 def log_history(u, act, count):
     ip = get_remote_ip(); dev = get_user_agent(); city, country = get_location_from_ip(ip)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # Lưu ý: Hàm này dùng để vẽ bản đồ nếu cần (bỏ qua lat/lon để đơn giản hóa code này)
+    
+    conn = get_db_connection()
+    c = conn.cursor()
     c.execute('INSERT INTO history (username, action, count, timestamp, ip, device, city, country, lat, lon) VALUES (?,?,?,?,?,?,?,?,?,?)', 
-              (u, act, count, ts, ip, dev, city, country, 0, 0)); conn.commit()
+              (u, act, count, ts, ip, dev, city, country, 0, 0))
+    conn.commit()
+    conn.close()
 
 def get_submissions(u=None):
+    conn = get_db_connection()
+    c = conn.cursor()
     q = "SELECT * FROM submissions WHERE status='Active'"
     p = []
     if u and u != "Tất cả": q += " AND username=?"; p.append(u)
     q += " ORDER BY id DESC"
-    c.execute(q, tuple(p)); return c.fetchall()
+    c.execute(q, tuple(p))
+    data = c.fetchall()
+    conn.close()
+    return data
 
-def delete_submission(sid): c.execute("UPDATE submissions SET status='Deleted' WHERE id=?", (sid,)); conn.commit()
-def get_all_users(): c.execute('SELECT username, role FROM users'); return c.fetchall()
-def delete_user_db(u): c.execute('DELETE FROM users WHERE username=?', (u,)); conn.commit()
+def delete_submission(sid): 
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("UPDATE submissions SET status='Deleted' WHERE id=?", (sid,))
+    conn.commit()
+    conn.close()
+
+def get_all_users(): 
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT username, role FROM users')
+    data = c.fetchall()
+    conn.close()
+    return data
+
+def delete_user_db(u): 
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('DELETE FROM users WHERE username=?', (u,))
+    conn.commit()
+    conn.close()
+
 def make_hashes(p): return hashlib.sha256(str.encode(p)).hexdigest()
 
+# Initialize DB and Admin
 init_db()
 try: add_user("admin", make_hashes("admin123"), "admin")
 except: pass
@@ -287,6 +343,10 @@ else:
 
         if st.session_state['data']:
             df_r = pd.DataFrame(st.session_state['data'])
+            # Ensure the column exists even if data is empty or malformed
+            if 'Link Address Bar' not in df_r.columns:
+                 df_r['Link Address Bar'] = [] # Create empty column if missing to prevent KeyError
+                 
             st.data_editor(df_r, column_config={"Link Address Bar": st.column_config.LinkColumn("Link Address Bar", display_text=None)}, use_container_width=True)
             
             # Xuất File (Ghép cột nếu input là Excel)
