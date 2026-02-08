@@ -8,15 +8,15 @@ import hashlib
 import concurrent.futures
 from io import BytesIO
 from datetime import datetime
-from urllib.parse import unquote, urlparse, parse_qs, urlencode
+from urllib.parse import unquote, urlparse, parse_qs
 from streamlit.web.server.websocket_headers import _get_websocket_headers
 
 # ==========================================
 # 1. CẤU HÌNH & HÀM HỖ TRỢ
 # ==========================================
 st.set_page_config(
-    page_title="Hệ Thống Lấy Link Address Bar",
-    page_icon="🔗",
+    page_title="Hệ Thống Lấy Link Address Bar V9",
+    page_icon="💎",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -32,7 +32,12 @@ def get_remote_ip():
 def get_user_agent():
     try:
         headers = _get_websocket_headers()
-        return headers.get("User-Agent", "Unknown Device")
+        ua = headers.get("User-Agent", "Unknown")
+        if "iPhone" in ua: return "iPhone"
+        elif "Android" in ua: return "Android Mobile"
+        elif "Windows" in ua: return "Windows PC"
+        elif "Macintosh" in ua: return "Macbook"
+        return "Other Device"
     except: return "Unknown Device"
 
 def get_location_from_ip(ip):
@@ -46,7 +51,7 @@ def get_location_from_ip(ip):
 # ==========================================
 # 2. DATABASE (SQLITE)
 # ==========================================
-conn = sqlite3.connect('data_v8_final.db', check_same_thread=False)
+conn = sqlite3.connect('data_v9_final.db', check_same_thread=False)
 c = conn.cursor()
 
 def init_db():
@@ -55,6 +60,9 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT, report_link TEXT, note TEXT, timestamp TEXT,
         ip TEXT, device TEXT, location TEXT, status TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS history(
+        username TEXT, action TEXT, count INTEGER, timestamp TEXT, 
+        ip TEXT, device TEXT, city TEXT, country TEXT, lat REAL, lon REAL)''')
     conn.commit()
 
 def add_user(u, p, r):
@@ -70,6 +78,13 @@ def submit_report(u, l, n):
     dev = get_user_agent(); city, country = get_location_from_ip(ip)
     c.execute('INSERT INTO submissions (username, report_link, note, timestamp, ip, device, location, status) VALUES (?,?,?,?,?,?,?,?)',
               (u, l, n, ts, ip, dev, f"{city}-{country}", "Active")); conn.commit()
+
+def log_history(u, act, count):
+    ip = get_remote_ip(); dev = get_user_agent(); city, country = get_location_from_ip(ip)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Lưu ý: Hàm này dùng để vẽ bản đồ nếu cần (bỏ qua lat/lon để đơn giản hóa code này)
+    c.execute('INSERT INTO history (username, action, count, timestamp, ip, device, city, country, lat, lon) VALUES (?,?,?,?,?,?,?,?,?,?)', 
+              (u, act, count, ts, ip, dev, city, country, 0, 0)); conn.commit()
 
 def get_submissions(u=None):
     q = "SELECT * FROM submissions WHERE status='Active'"
@@ -102,78 +117,75 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 4. CORE LOGIC V8.0 (GIẢ LẬP TRÌNH DUYỆT)
+# 4. CORE LOGIC V9.0 (UPDATE CHO LINK GROUP)
 # ==========================================
 def resolve_link_logic(input_str):
     """
-    Logic V8: Giả lập trình duyệt để lấy link trên thanh Address Bar.
+    Logic V9: Xử lý link share/p trong Group và trả về link Address Bar chuẩn nhất.
     """
     input_str = str(input_str).strip()
     if not input_str: return None, None, "Trống"
     
-    # URL cuối cùng (mục tiêu là lấy cái này giống hệt thanh địa chỉ)
     final_url = input_str
     post_id = "Không tìm thấy"
     note = "OK"
 
     try:
-        # 1. GIẢ LẬP TRÌNH DUYỆT (Để FB trả về link thật thay vì link share)
-        # Nếu là link rút gọn hoặc link share, ta phải request để lấy link đích
+        # 1. GIẢ LẬP TRÌNH DUYỆT (FOLLOW REDIRECT)
         trigger_domains = ["share", "goo.gl", "bit.ly", "fb.me", "short", "fbook", "fb.watch", "facebook.com/share"]
         
         if any(d in input_str for d in trigger_domains):
-            # Header giả lập Chrome trên Windows (Giống Cốc Cốc)
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Sec-Fetch-Site': 'none',
                 'Upgrade-Insecure-Requests': '1'
             }
             try:
-                # allow_redirects=True: Bắt buộc bật để nó nhảy đến link cuối cùng
-                response = requests.head(input_str, allow_redirects=True, headers=headers, timeout=10)
-                
-                # Đây chính là cái link hiện trên thanh địa chỉ sau khi load xong
+                # Bắt buộc allow_redirects=True để nó nhảy từ share -> groups/posts
+                response = requests.head(input_str, allow_redirects=True, headers=headers, timeout=12)
                 final_url = response.url 
             except Exception as e:
-                # Nếu request lỗi, vẫn cố gắng xử lý link gốc
                 note = f"Lỗi Redirect: {str(e)}"
 
-        # 2. XỬ LÝ URL THANH ĐỊA CHỈ (CLEANING)
-        # Giải mã ký tự % (VD: %3A -> :)
+        # 2. CLEAN URL
         final_url = unquote(final_url)
-        
-        # Đổi m.facebook -> www.facebook (Cho chuẩn giao diện PC)
         final_url = final_url.replace("://m.facebook.com", "://www.facebook.com")
-        final_url = final_url.replace("://web.facebook.com", "://www.facebook.com")
+        
+        # Cắt bỏ tham số rác (mibextid, ref, etc.)
+        if "?" in final_url:
+            base_url = final_url.split("?")[0]
+            params = final_url.split("?")[1]
+            
+            # Chỉ giữ lại các tham số quan trọng
+            keep_params = ["id", "v", "set", "fbid", "comment_id", "reply_comment_id", "story_fbid"]
+            clean_query = []
+            
+            for p in params.split("&"):
+                key = p.split("=")[0]
+                if key in keep_params:
+                    clean_query.append(p)
+            
+            if clean_query:
+                final_url = f"{base_url}?{'&'.join(clean_query)}"
+            else:
+                final_url = base_url
 
-        # Phân tích URL để lọc rác
-        parsed = urlparse(final_url)
-        clean_query = []
-        
-        # Giữ lại các tham số quan trọng, bỏ rác tracking
-        # Các tham số quan trọng trên thanh địa chỉ:
-        important_params = ["fbid", "v", "set", "id", "story_fbid", "comment_id", "reply_comment_id"]
-        
-        query_params = parse_qs(parsed.query)
-        for key, values in query_params.items():
-            if key in important_params:
-                for v in values:
-                    clean_query.append(f"{key}={v}")
-        
-        # Tái tạo URL sạch
-        base_path = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        if clean_query:
-            final_url = f"{base_path}?{'&'.join(clean_query)}"
-        else:
-            final_url = base_path
-
-        # 3. TRÍCH XUẤT ID (ĐỂ LƯU DATA)
+        # 3. TRÍCH XUẤT ID (ƯU TIÊN LINK GROUP POST)
         patterns = [
-            r'fbid=(\d+)', r'v=(\d+)', r'/posts/(\d+)', r'/videos/(\d+)', r'/reel/(\d+)',
-            r'/stories/[a-zA-Z0-9.]+/(?P<id>\d+)', r'story_fbid=(\d+)', 
-            r'multi_permalinks=(\d+)', r'group_id=(\d+)', 
-            r'/groups/[^/]+/permalink/(\d+)', r'id=(\d+)', r'/(\d+)/?$'
+            r'/groups/[^/]+/posts/(\d+)',           # <--- ƯU TIÊN 1: Link bài viết trong Group
+            r'/groups/[^/]+/permalink/(\d+)',       # Link group permalink cũ
+            r'/posts/(\d+)',                        # Bài viết thường
+            r'fbid=(\d+)',                          # Link ảnh/cũ
+            r'v=(\d+)',                             # Link video tham số
+            r'/videos/(\d+)',                       # Link video path
+            r'/reel/(\d+)',                         # Reels
+            r'/stories/[a-zA-Z0-9.]+/(?P<id>\d+)',  # Story
+            r'story_fbid=(\d+)', 
+            r'multi_permalinks=(\d+)', 
+            r'group_id=(\d+)', 
+            r'id=(\d+)', 
+            r'/(\d+)/?$'                            # ID cuối cùng
         ]
         
         if input_str.isdigit():
@@ -190,7 +202,6 @@ def resolve_link_logic(input_str):
         if post_id != "Không tìm thấy":
             return final_url, post_id, "Thành công"
         else:
-            # Nếu không tìm thấy ID số nhưng link có vẻ chuẩn
             if "facebook.com" in final_url:
                 return final_url, "ID Ẩn/Chữ", "Link Address Bar (ID ẩn)"
             return final_url, "Không tìm thấy ID", "Cảnh báo"
@@ -208,7 +219,7 @@ if 'role' not in st.session_state: st.session_state['role'] = ''
 
 # --- LOGIN ---
 if not st.session_state['logged_in']:
-    st.title("🔐 Đăng Nhập Hệ Thống")
+    st.title("🔐 Đăng Nhập Hệ Thống V9")
     c1, c2 = st.columns(2)
     with c1:
         u = st.text_input("Tài khoản")
@@ -237,7 +248,7 @@ else:
 
     # --- TAB 1: TOOL ---
     with tabs[0]:
-        st.info("💡 Copy link bất kỳ -> Tool sẽ trả về Link chuẩn như trên thanh địa chỉ.")
+        st.info("💡 Copy link (kể cả link Share trong Group) -> Tool sẽ trả về Link chuẩn Address Bar.")
         
         file_in = st.file_uploader("📂 Upload File (Excel/TXT)", type=['xlsx', 'txt'])
         txt_in = st.text_area("📝 Nhập thủ công:", height=100)
@@ -260,6 +271,7 @@ else:
 
             if in_lines:
                 tot = len(in_lines)
+                log_history(st.session_state['username'], "Chạy Tool", tot)
                 st.toast(f"Đang giả lập trình duyệt lấy {tot} link...", icon="🚀")
                 prog = st.progress(0); stt = st.empty(); res = [None]*tot
                 
@@ -278,10 +290,10 @@ else:
             df_r = pd.DataFrame(st.session_state['data'])
             st.data_editor(df_r, column_config={"Link Address Bar": st.column_config.LinkColumn("Link Address Bar", display_text=None)}, use_container_width=True)
             
-            # Xuất File
+            # Xuất File (Ghép cột nếu input là Excel)
             out = BytesIO(); fn = "ket_qua.xlsx"
             if st.session_state.get('in_type') == 'file' and st.session_state.get('f_name', '').endswith('.xlsx'):
-                df_root = st.session_state['df_up']; df_root['Link Chuẩn (New)'] = df_r['Link Address Bar']; df_root['ID (New)'] = df_r['ID']
+                df_root = st.session_state['df_up']; df_root['Link Address Bar (New)'] = df_r['Link Address Bar']; df_root['ID (New)'] = df_r['ID']
                 with pd.ExcelWriter(out, engine='xlsxwriter') as w: df_root.to_excel(w, index=False)
                 fn = f"DONE_{st.session_state['f_name']}"
             else:
