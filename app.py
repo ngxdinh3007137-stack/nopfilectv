@@ -7,6 +7,7 @@ import sqlite3
 import hashlib
 import concurrent.futures
 import threading
+import random
 from io import BytesIO
 from datetime import datetime
 from urllib.parse import unquote, urlparse, parse_qs
@@ -16,34 +17,28 @@ from streamlit.web.server.websocket_headers import _get_websocket_headers
 # 1. CẤU HÌNH & HÀM HỖ TRỢ
 # ==========================================
 st.set_page_config(
-    page_title="Hệ Thống Admin V11 (WAL)",
+    page_title="Hệ Thống Admin V12.1",
     page_icon="💎",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# Khóa luồng để xử lý tranh chấp
+# Khóa luồng
 db_lock = threading.Lock()
 
 # --- TRACKING ---
 def get_remote_ip():
     try:
-        # Thử lấy headers theo cách mới hoặc cũ để tránh warning
-        try:
-            headers = st.context.headers
-        except:
-            headers = _get_websocket_headers()
-            
+        try: headers = st.context.headers
+        except: headers = _get_websocket_headers()
         if "X-Forwarded-For" in headers: return headers["X-Forwarded-For"].split(",")[0]
         return headers.get("Remote-Addr", "Unknown")
     except: return "Unknown"
 
 def get_user_agent():
     try:
-        try:
-            headers = st.context.headers
-        except:
-            headers = _get_websocket_headers()
+        try: headers = st.context.headers
+        except: headers = _get_websocket_headers()
         ua = headers.get("User-Agent", "Unknown")
         return ua if ua else "Unknown Device"
     except: return "Unknown Device"
@@ -57,115 +52,98 @@ def get_location_from_ip(ip):
     return "Unknown", "Unknown"
 
 # ==========================================
-# 2. DATABASE (SQLITE - WAL MODE)
+# 2. DATABASE (RETRY MODE - CHỐNG LOCK)
 # ==========================================
-# Đổi tên DB để áp dụng chế độ mới
-DB_NAME = 'data_v11_wal_mode.db'
+DB_NAME = 'data_v12_retry_final.db'
 
-def get_db_connection():
-    # timeout=30: Đợi 30s nếu DB đang bận thay vì lỗi ngay
-    conn = sqlite3.connect(DB_NAME, timeout=30, check_same_thread=False)
-    # Bật chế độ WAL (Write-Ahead Logging) để tránh Lock
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-    except:
-        pass
-    return conn
+def run_query_safe(query, params=(), is_write=False):
+    max_retries = 10
+    for i in range(max_retries):
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_NAME, timeout=15, check_same_thread=False)
+            # Bật WAL mode để ghi nhanh hơn
+            try: conn.execute("PRAGMA journal_mode=WAL")
+            except: pass
+            
+            c = conn.cursor()
+            c.execute(query, params)
+            
+            if is_write:
+                conn.commit()
+                result = True
+            else:
+                result = c.fetchall()
+            
+            conn.close()
+            return result
+            
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e):
+                time.sleep(random.uniform(0.1, 0.5)) # Đợi một chút rồi thử lại
+                if i == max_retries - 1: return None
+            else:
+                if conn: conn.close()
+                return None
+        except Exception as e:
+            if conn: conn.close()
+            return None
 
 def init_db():
-    with db_lock:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute('CREATE TABLE IF NOT EXISTS users(username TEXT PRIMARY KEY, password TEXT, role TEXT)')
-        c.execute('''CREATE TABLE IF NOT EXISTS submissions(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT, report_link TEXT, note TEXT, timestamp TEXT,
-            ip TEXT, device TEXT, location TEXT, status TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS history(
-            username TEXT, action TEXT, count INTEGER, timestamp TEXT, 
-            ip TEXT, device TEXT, city TEXT, country TEXT, lat REAL, lon REAL)''')
-        conn.commit()
-        conn.close()
+    run_query_safe('CREATE TABLE IF NOT EXISTS users(username TEXT PRIMARY KEY, password TEXT, role TEXT)', is_write=True)
+    run_query_safe('''CREATE TABLE IF NOT EXISTS submissions(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT, report_link TEXT, note TEXT, timestamp TEXT,
+        ip TEXT, device TEXT, location TEXT, status TEXT)''', is_write=True)
+    run_query_safe('''CREATE TABLE IF NOT EXISTS history(
+        username TEXT, action TEXT, count INTEGER, timestamp TEXT, 
+        ip TEXT, device TEXT, city TEXT, country TEXT, lat REAL, lon REAL)''', is_write=True)
 
+# --- WRAPPER FUNCTIONS ---
 def add_user(u, p, r):
-    with db_lock:
-        try: 
-            conn = get_db_connection()
-            c = conn.cursor()
-            c.execute('INSERT INTO users VALUES (?,?,?)', (u, p, r))
-            conn.commit()
-            conn.close()
-            return True, "Thành công"
-        except sqlite3.IntegrityError:
-            return False, "Tên tài khoản đã tồn tại!"
-        except Exception as e: 
-            return False, str(e)
+    check = run_query_safe('SELECT * FROM users WHERE username=?', (u,))
+    if check: return False, "Tài khoản đã tồn tại!"
+    res = run_query_safe('INSERT INTO users VALUES (?,?,?)', (u, p, r), is_write=True)
+    if res: return True, "Thành công"
+    return False, "Lỗi ghi dữ liệu"
 
 def login(u, p):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT * FROM users WHERE username=? AND password=?', (u, p))
-    data = c.fetchall()
-    conn.close()
-    return data
+    return run_query_safe('SELECT * FROM users WHERE username=? AND password=?', (u, p))
 
 def submit_report(u, l, n):
     ip = get_remote_ip(); ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     dev = get_user_agent(); city, country = get_location_from_ip(ip)
-    with db_lock:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute('INSERT INTO submissions (username, report_link, note, timestamp, ip, device, location, status) VALUES (?,?,?,?,?,?,?,?)',
-                  (u, l, n, ts, ip, dev, f"{city}-{country}", "Active"))
-        conn.commit(); conn.close()
+    run_query_safe('INSERT INTO submissions (username, report_link, note, timestamp, ip, device, location, status) VALUES (?,?,?,?,?,?,?,?)',
+                   (u, l, n, ts, ip, dev, f"{city}-{country}", "Active"), is_write=True)
 
 def log_history(u, act, count):
     ip = get_remote_ip(); dev = get_user_agent(); city, country = get_location_from_ip(ip)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with db_lock:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute('INSERT INTO history (username, action, count, timestamp, ip, device, city, country, lat, lon) VALUES (?,?,?,?,?,?,?,?,?,?)', 
-                  (u, act, count, ts, ip, dev, city, country, 0, 0))
-        conn.commit(); conn.close()
+    run_query_safe('INSERT INTO history (username, action, count, timestamp, ip, device, city, country, lat, lon) VALUES (?,?,?,?,?,?,?,?,?,?)', 
+                   (u, act, count, ts, ip, dev, city, country, 0, 0), is_write=True)
 
 def get_submissions(u=None):
-    conn = get_db_connection()
-    c = conn.cursor()
     q = "SELECT * FROM submissions WHERE status='Active'"
     p = []
     if u and u != "Tất cả": q += " AND username=?"; p.append(u)
     q += " ORDER BY id DESC"
-    c.execute(q, tuple(p)); data = c.fetchall(); conn.close()
-    return data
+    return run_query_safe(q, tuple(p))
 
 def delete_submission(sid): 
-    with db_lock:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("UPDATE submissions SET status='Deleted' WHERE id=?", (sid,))
-        conn.commit(); conn.close()
+    run_query_safe("UPDATE submissions SET status='Deleted' WHERE id=?", (sid,), is_write=True)
 
 def get_all_users(): 
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT username, role FROM users')
-    data = c.fetchall(); conn.close()
-    return data
+    return run_query_safe('SELECT username, role FROM users')
 
 def delete_user_db(u): 
-    with db_lock:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute('DELETE FROM users WHERE username=?', (u,))
-        conn.commit(); conn.close()
+    run_query_safe('DELETE FROM users WHERE username=?', (u,), is_write=True)
 
 def make_hashes(p): return hashlib.sha256(str.encode(p)).hexdigest()
 
-# KHỞI TẠO
+# Init
 init_db()
-try: add_user("admin", make_hashes("admin123"), "admin")
-except: pass
+if not run_query_safe("SELECT * FROM users WHERE username='admin'"):
+    add_user("admin", make_hashes("admin123"), "admin")
 
 # ==========================================
 # 3. CSS GIAO DIỆN
@@ -318,8 +296,8 @@ else:
         if st.session_state['data']:
             df_r = pd.DataFrame(st.session_state['data'])
             if 'Link Address Bar' not in df_r.columns: df_r['Link Address Bar'] = []
-            # Cấu hình width="stretch" để tránh warning deprecated
-            st.data_editor(df_r, column_config={"Link Address Bar": st.column_config.LinkColumn("Link Address Bar", display_text=None)}, width=None, use_container_width=True)
+            # ĐÃ SỬA LỖI Ở DÒNG NÀY: XÓA width=None
+            st.data_editor(df_r, column_config={"Link Address Bar": st.column_config.LinkColumn("Link Address Bar", display_text=None)}, use_container_width=True)
             
             out = BytesIO(); fn = "ket_qua.xlsx"
             if st.session_state.get('in_type') == 'file' and st.session_state.get('f_name', '').endswith('.xlsx'):
@@ -354,16 +332,17 @@ else:
     else: # Admin
         with tabs[1]:
             st.subheader("📂 Kho Báo Cáo")
-            sel_u = st.selectbox("Lọc User:", ["Tất cả"] + [u[0] for u in get_all_users()])
+            users_res = get_all_users()
+            users_list = ["Tất cả"] + [u[0] for u in users_res] if users_res else ["Tất cả"]
+            sel_u = st.selectbox("Lọc User:", users_list)
             subs = get_submissions(sel_u)
             if subs:
                 df_s = pd.DataFrame(subs, columns=["ID", "User", "Link", "Note", "Time", "IP", "Dev", "Loc", "Stat"])
-                # Sửa warning width
+                # Sửa lỗi width ở đây luôn
                 st.data_editor(df_s[["User", "Link", "Note", "Time", "Loc"]], column_config={"Link": st.column_config.LinkColumn("Link", display_text="🔗 Mở")}, use_container_width=True)
 
         with tabs[2]:
             st.subheader("📊 Quản Trị")
-            # --- FORM TẠO USER ---
             c1, c2 = st.columns(2)
             with c1:
                 st.write("➕ **Thêm Mới**")
@@ -372,27 +351,19 @@ else:
                     pa = st.text_input("Mật khẩu mới", type="password")
                     ra = st.selectbox("Quyền", ["user", "admin"])
                     submitted = st.form_submit_button("Tạo Tài Khoản")
-                    
                     if submitted:
-                        if not ua or not pa:
-                            st.error("⚠️ Điền thiếu thông tin!")
+                        if not ua or not pa: st.error("⚠️ Thiếu thông tin!")
                         else:
                             success, msg = add_user(ua, make_hashes(pa), ra)
-                            if success:
-                                st.success(f"✅ Đã tạo user: {ua}")
-                                time.sleep(1)
-                                st.rerun()
-                            else:
-                                st.error(f"❌ Lỗi: {msg}")
+                            if success: st.success(f"✅ Đã tạo: {ua}"); time.sleep(1); st.rerun()
+                            else: st.error(f"❌ {msg}")
             
             with c2:
                 st.write("❌ **Xóa User**")
-                users_list = [u[0] for u in get_all_users()]
+                users_res = get_all_users()
+                users_list = [u[0] for u in users_res] if users_res else []
                 with st.form("delete_user_form"):
                     ud = st.selectbox("Chọn User xóa", users_list)
                     del_submitted = st.form_submit_button("Xóa Ngay")
                     if del_submitted:
-                        delete_user_db(ud)
-                        st.success(f"Đã xóa {ud}")
-                        time.sleep(1)
-                        st.rerun()
+                        delete_user_db(ud); st.success(f"Đã xóa {ud}"); time.sleep(1); st.rerun()
