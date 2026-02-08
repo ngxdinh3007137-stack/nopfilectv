@@ -6,26 +6,28 @@ import time
 import sqlite3
 import hashlib
 import concurrent.futures
+import threading
 from io import BytesIO
 from datetime import datetime
-from urllib.parse import unquote, urlparse, parse_qs, urlencode
+from urllib.parse import unquote, urlparse, parse_qs
 from streamlit.web.server.websocket_headers import _get_websocket_headers
 
 # ==========================================
 # 1. CẤU HÌNH & HÀM HỖ TRỢ
 # ==========================================
 st.set_page_config(
-    page_title="Hệ Thống Lấy Link Address Bar V9",
+    page_title="Hệ Thống Lấy Link Address Bar V10.1",
     page_icon="💎",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
+# Tạo khóa để tránh xung đột Database khi nhiều người dùng
+db_lock = threading.Lock()
+
 # --- TRACKING ---
 def get_remote_ip():
     try:
-        # Note: _get_websocket_headers is deprecated but used here as per original code.
-        # Ideally, use st.context.headers in newer Streamlit versions if available.
         headers = _get_websocket_headers()
         if "X-Forwarded-For" in headers: return headers["X-Forwarded-For"].split(",")[0]
         return headers.get("Remote-Addr", "Unknown")
@@ -53,38 +55,39 @@ def get_location_from_ip(ip):
 # ==========================================
 # 2. DATABASE (SQLITE)
 # ==========================================
-# DB_NAME = 'data_v9_final_fix.db'
-DB_NAME = 'data_v9_final_fix_v2.db' # Changed name to ensure fresh DB structure if needed
+DB_NAME = 'data_final_v10_fix.db'
 
 def get_db_connection():
-    """Create a new database connection."""
-    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
-    return conn
+    return sqlite3.connect(DB_NAME, check_same_thread=False)
 
 def init_db():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('CREATE TABLE IF NOT EXISTS users(username TEXT PRIMARY KEY, password TEXT, role TEXT)')
-    c.execute('''CREATE TABLE IF NOT EXISTS submissions(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT, report_link TEXT, note TEXT, timestamp TEXT,
-        ip TEXT, device TEXT, location TEXT, status TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS history(
-        username TEXT, action TEXT, count INTEGER, timestamp TEXT, 
-        ip TEXT, device TEXT, city TEXT, country TEXT, lat REAL, lon REAL)''')
-    conn.commit()
-    conn.close()
-
-def add_user(u, p, r):
-    try: 
+    with db_lock:
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute('INSERT INTO users VALUES (?,?,?)', (u, p, r))
+        c.execute('CREATE TABLE IF NOT EXISTS users(username TEXT PRIMARY KEY, password TEXT, role TEXT)')
+        c.execute('''CREATE TABLE IF NOT EXISTS submissions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT, report_link TEXT, note TEXT, timestamp TEXT,
+            ip TEXT, device TEXT, location TEXT, status TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS history(
+            username TEXT, action TEXT, count INTEGER, timestamp TEXT, 
+            ip TEXT, device TEXT, city TEXT, country TEXT, lat REAL, lon REAL)''')
         conn.commit()
         conn.close()
-        return True
-    except: 
-        return False
+
+def add_user(u, p, r):
+    with db_lock:
+        try: 
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute('INSERT INTO users VALUES (?,?,?)', (u, p, r))
+            conn.commit()
+            conn.close()
+            return True, "Thành công"
+        except sqlite3.IntegrityError:
+            return False, "Tên tài khoản đã tồn tại!"
+        except Exception as e: 
+            return False, str(e)
 
 def login(u, p):
     conn = get_db_connection()
@@ -97,24 +100,22 @@ def login(u, p):
 def submit_report(u, l, n):
     ip = get_remote_ip(); ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     dev = get_user_agent(); city, country = get_location_from_ip(ip)
-    
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('INSERT INTO submissions (username, report_link, note, timestamp, ip, device, location, status) VALUES (?,?,?,?,?,?,?,?)',
-              (u, l, n, ts, ip, dev, f"{city}-{country}", "Active"))
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('INSERT INTO submissions (username, report_link, note, timestamp, ip, device, location, status) VALUES (?,?,?,?,?,?,?,?)',
+                  (u, l, n, ts, ip, dev, f"{city}-{country}", "Active"))
+        conn.commit(); conn.close()
 
 def log_history(u, act, count):
     ip = get_remote_ip(); dev = get_user_agent(); city, country = get_location_from_ip(ip)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('INSERT INTO history (username, action, count, timestamp, ip, device, city, country, lat, lon) VALUES (?,?,?,?,?,?,?,?,?,?)', 
-              (u, act, count, ts, ip, dev, city, country, 0, 0))
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('INSERT INTO history (username, action, count, timestamp, ip, device, city, country, lat, lon) VALUES (?,?,?,?,?,?,?,?,?,?)', 
+                  (u, act, count, ts, ip, dev, city, country, 0, 0))
+        conn.commit(); conn.close()
 
 def get_submissions(u=None):
     conn = get_db_connection()
@@ -123,36 +124,33 @@ def get_submissions(u=None):
     p = []
     if u and u != "Tất cả": q += " AND username=?"; p.append(u)
     q += " ORDER BY id DESC"
-    c.execute(q, tuple(p))
-    data = c.fetchall()
-    conn.close()
+    c.execute(q, tuple(p)); data = c.fetchall(); conn.close()
     return data
 
 def delete_submission(sid): 
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE submissions SET status='Deleted' WHERE id=?", (sid,))
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE submissions SET status='Deleted' WHERE id=?", (sid,))
+        conn.commit(); conn.close()
 
 def get_all_users(): 
     conn = get_db_connection()
     c = conn.cursor()
     c.execute('SELECT username, role FROM users')
-    data = c.fetchall()
-    conn.close()
+    data = c.fetchall(); conn.close()
     return data
 
 def delete_user_db(u): 
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('DELETE FROM users WHERE username=?', (u,))
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('DELETE FROM users WHERE username=?', (u,))
+        conn.commit(); conn.close()
 
 def make_hashes(p): return hashlib.sha256(str.encode(p)).hexdigest()
 
-# Initialize DB and Admin
+# KHỞI TẠO
 init_db()
 try: add_user("admin", make_hashes("admin123"), "admin")
 except: pass
@@ -175,72 +173,42 @@ st.markdown("""
 # 4. CORE LOGIC V9.0 (UPDATE CHO LINK GROUP)
 # ==========================================
 def resolve_link_logic(input_str):
-    """
-    Logic V9: Xử lý link share/p trong Group và trả về link Address Bar chuẩn nhất.
-    """
     input_str = str(input_str).strip()
     if not input_str: return None, None, "Trống"
-    
-    final_url = input_str
-    post_id = "Không tìm thấy"
-    note = "OK"
+    final_url = input_str; post_id = "Không tìm thấy"; note = "OK"
 
     try:
-        # 1. GIẢ LẬP TRÌNH DUYỆT (FOLLOW REDIRECT)
         trigger_domains = ["share", "goo.gl", "bit.ly", "fb.me", "short", "fbook", "fb.watch", "facebook.com/share"]
-        
         if any(d in input_str for d in trigger_domains):
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Sec-Fetch-Site': 'none',
-                'Upgrade-Insecure-Requests': '1'
+                'Sec-Fetch-Site': 'none', 'Upgrade-Insecure-Requests': '1'
             }
             try:
-                # Bắt buộc allow_redirects=True để nó nhảy từ share -> groups/posts
                 response = requests.head(input_str, allow_redirects=True, headers=headers, timeout=12)
                 final_url = response.url 
-            except Exception as e:
-                note = f"Lỗi Redirect: {str(e)}"
+            except Exception as e: note = f"Lỗi Redirect: {str(e)}"
 
-        # 2. CLEAN URL
         final_url = unquote(final_url)
         final_url = final_url.replace("://m.facebook.com", "://www.facebook.com")
         
-        # Cắt bỏ tham số rác (mibextid, ref, etc.)
         if "?" in final_url:
             base_url = final_url.split("?")[0]
             params = final_url.split("?")[1]
-            
-            # Chỉ giữ lại các tham số quan trọng
             keep_params = ["id", "v", "set", "fbid", "comment_id", "reply_comment_id", "story_fbid"]
             clean_query = []
-            
             for p in params.split("&"):
                 key = p.split("=")[0]
-                if key in keep_params:
-                    clean_query.append(p)
-            
-            if clean_query:
-                final_url = f"{base_url}?{'&'.join(clean_query)}"
-            else:
-                final_url = base_url
+                if key in keep_params: clean_query.append(p)
+            if clean_query: final_url = f"{base_url}?{'&'.join(clean_query)}"
+            else: final_url = base_url
 
-        # 3. TRÍCH XUẤT ID (ƯU TIÊN LINK GROUP POST)
         patterns = [
-            r'/groups/[^/]+/posts/(\d+)',           # <--- ƯU TIÊN 1: Link bài viết trong Group
-            r'/groups/[^/]+/permalink/(\d+)',       # Link group permalink cũ
-            r'/posts/(\d+)',                        # Bài viết thường
-            r'fbid=(\d+)',                          # Link ảnh/cũ
-            r'v=(\d+)',                             # Link video tham số
-            r'/videos/(\d+)',                       # Link video path
-            r'/reel/(\d+)',                         # Reels
-            r'/stories/[a-zA-Z0-9.]+/(?P<id>\d+)',  # Story
-            r'story_fbid=(\d+)', 
-            r'multi_permalinks=(\d+)', 
-            r'group_id=(\d+)', 
-            r'id=(\d+)', 
-            r'/(\d+)/?$'                            # ID cuối cùng
+            r'/groups/[^/]+/posts/(\d+)', r'/groups/[^/]+/permalink/(\d+)', r'/posts/(\d+)',
+            r'fbid=(\d+)', r'v=(\d+)', r'/videos/(\d+)', r'/reel/(\d+)',
+            r'/stories/[a-zA-Z0-9.]+/(?P<id>\d+)', r'story_fbid=(\d+)', 
+            r'multi_permalinks=(\d+)', r'group_id=(\d+)', r'id=(\d+)', r'/(\d+)/?$'
         ]
         
         if input_str.isdigit():
@@ -254,16 +222,11 @@ def resolve_link_logic(input_str):
                     except: post_id = match.group(1)
                     break
 
-        if post_id != "Không tìm thấy":
-            return final_url, post_id, "Thành công"
+        if post_id != "Không tìm thấy": return final_url, post_id, "Thành công"
         else:
-            if "facebook.com" in final_url:
-                return final_url, "ID Ẩn/Chữ", "Link Address Bar (ID ẩn)"
+            if "facebook.com" in final_url: return final_url, "ID Ẩn/Chữ", "Link Address Bar (ID ẩn)"
             return final_url, "Không tìm thấy ID", "Cảnh báo"
-
-    except Exception as e:
-        return input_str, "Lỗi Code", str(e)
-
+    except Exception as e: return input_str, "Lỗi Code", str(e)
 
 # ==========================================
 # 5. GIAO DIỆN CHÍNH
@@ -274,7 +237,7 @@ if 'role' not in st.session_state: st.session_state['role'] = ''
 
 # --- LOGIN ---
 if not st.session_state['logged_in']:
-    st.title("🔐 Đăng Nhập Hệ Thống V9")
+    st.title("🔐 Đăng Nhập Hệ Thống V10.1")
     c1, c2 = st.columns(2)
     with c1:
         u = st.text_input("Tài khoản")
@@ -303,8 +266,7 @@ else:
 
     # --- TAB 1: TOOL ---
     with tabs[0]:
-        st.info("💡 Copy link (kể cả link Share trong Group) -> Tool sẽ trả về Link chuẩn Address Bar.")
-        
+        st.info("💡 Copy link -> Tool sẽ trả về Link chuẩn Address Bar.")
         file_in = st.file_uploader("📂 Upload File (Excel/TXT)", type=['xlsx', 'txt'])
         txt_in = st.text_area("📝 Nhập thủ công:", height=100)
         c1, c2 = st.columns([1, 4])
@@ -343,13 +305,9 @@ else:
 
         if st.session_state['data']:
             df_r = pd.DataFrame(st.session_state['data'])
-            # Ensure the column exists even if data is empty or malformed
-            if 'Link Address Bar' not in df_r.columns:
-                 df_r['Link Address Bar'] = [] # Create empty column if missing to prevent KeyError
-                 
+            if 'Link Address Bar' not in df_r.columns: df_r['Link Address Bar'] = []
             st.data_editor(df_r, column_config={"Link Address Bar": st.column_config.LinkColumn("Link Address Bar", display_text=None)}, use_container_width=True)
             
-            # Xuất File (Ghép cột nếu input là Excel)
             out = BytesIO(); fn = "ket_qua.xlsx"
             if st.session_state.get('in_type') == 'file' and st.session_state.get('f_name', '').endswith('.xlsx'):
                 df_root = st.session_state['df_up']; df_root['Link Address Bar (New)'] = df_r['Link Address Bar']; df_root['ID (New)'] = df_r['ID']
@@ -364,7 +322,7 @@ else:
             with t3: st.code("\n".join([str(x) for x in df_r["ID"] if x and x!="Không tìm thấy"]), language="text")
             with t4: st.download_button("📥 Tải Excel", out.getvalue(), fn)
 
-    # --- TAB 2 & 3: GIỐNG CŨ (QUẢN LÝ) ---
+    # --- TAB 2 & 3 ---
     if st.session_state['role'] != 'admin':
         with tabs[1]:
             st.subheader("📤 Nộp Báo Cáo")
@@ -373,8 +331,6 @@ else:
                 if st.form_submit_button("Gửi"): 
                     if "http" in lnk: submit_report(st.session_state['username'], lnk, nte); st.success("Đã gửi!"); st.rerun()
                     else: st.error("Link lỗi!")
-            
-            st.write("🕒 **Lịch sử nộp phiên này**")
             mys = get_submissions(st.session_state['username'])
             if mys:
                 for s in mys[:5]:
@@ -393,9 +349,33 @@ else:
 
         with tabs[2]:
             st.subheader("📊 Quản Trị")
-            with st.expander("Thêm/Xóa User"):
-                ua = st.text_input("New User"); pa = st.text_input("Pass", type="password"); ra = st.selectbox("Role", ["user", "admin"])
-                if st.button("Tạo"): 
-                    if add_user(ua, make_hashes(pa), ra): st.success("OK"); st.rerun()
-                ud = st.selectbox("Del User", [u[0] for u in get_all_users()])
-                if st.button("Xóa"): delete_user_db(ud); st.rerun()
+            # --- PHẦN TẠO USER ĐÃ ĐƯỢC SỬA LỖI ---
+            with st.expander("Thêm/Xóa User", expanded=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.write("➕ **Thêm Mới**")
+                    ua = st.text_input("Tên đăng nhập mới")
+                    pa = st.text_input("Mật khẩu mới", type="password")
+                    ra = st.selectbox("Quyền", ["user", "admin"])
+                    
+                    if st.button("Tạo Tài Khoản"):
+                        if not ua or not pa:
+                            st.warning("⚠️ Vui lòng điền đủ Tên và Mật khẩu!")
+                        else:
+                            success, msg = add_user(ua, make_hashes(pa), ra)
+                            if success:
+                                st.success(f"✅ Đã tạo user: {ua}")
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Lỗi: {msg}")
+                
+                with c2:
+                    st.write("❌ **Xóa User**")
+                    users_list = [u[0] for u in get_all_users()]
+                    ud = st.selectbox("Chọn User để xóa", users_list)
+                    if st.button("Xóa Ngay"):
+                        delete_user_db(ud)
+                        st.success(f"Đã xóa {ud}")
+                        time.sleep(1)
+                        st.rerun()
