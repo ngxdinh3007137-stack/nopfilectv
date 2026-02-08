@@ -14,23 +14,26 @@ from urllib.parse import unquote, urlparse, parse_qs
 from streamlit.web.server.websocket_headers import _get_websocket_headers
 
 # ==========================================
-# 1. CẤU HÌNH & CSS TỐI ƯU GIAO DIỆN
+# 1. CẤU HÌNH & CSS (GIAO DIỆN PC/MOBILE)
 # ==========================================
 st.set_page_config(
-    page_title="Hệ Thống Xử Lý Link Pro",
+    page_title="Hệ Thống Xử Lý Link V14",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# CSS tùy chỉnh
+# CSS: Tối ưu nút bấm và bảng
 st.markdown("""
 <style>
-    .stButton>button { width: 100%; border-radius: 8px; font-weight: bold; padding: 0.5rem; transition: 0.3s; }
-    .stButton>button:hover { transform: scale(1.02); }
-    section[data-testid="stSidebar"] { background-color: #f8f9fa; }
-    div[data-testid="stDataFrame"] { width: 100%; }
-    div[data-testid="stToast"] { background-color: #fff; border-left: 5px solid #1877f2; color: #333; font-weight: bold; }
+    /* Nút bấm to, rõ */
+    .stButton>button { border-radius: 8px; font-weight: bold; height: 3em; }
+    /* Sidebar màu sáng sủa */
+    section[data-testid="stSidebar"] { background-color: #f0f2f6; }
+    /* Tab Admin to rõ */
+    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
+    .stTabs [data-baseweb="tab"] { background-color: #ffffff; border-radius: 5px; padding: 10px 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .stTabs [aria-selected="true"] { background-color: #e7f3ff; color: #1877f2; border: 1px solid #1877f2; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -39,7 +42,7 @@ db_lock = threading.Lock()
 # ==========================================
 # 2. DATABASE & HÀM HỖ TRỢ (WAL MODE)
 # ==========================================
-DB_NAME = 'data_system_final_v13_1.db'
+DB_NAME = 'data_system_v14_final.db'
 
 def get_remote_ip():
     try:
@@ -104,7 +107,7 @@ def init_db():
         username TEXT, action TEXT, count INTEGER, timestamp TEXT, 
         ip TEXT, device TEXT, city TEXT, country TEXT, lat REAL, lon REAL)''', is_write=True)
 
-# --- CÁC HÀM XỬ LÝ DATABASE ---
+# --- DB FUNCTIONS ---
 def add_user(u, p, r):
     check = run_query_safe('SELECT * FROM users WHERE username=?', (u,))
     if check: return False, "Tài khoản tồn tại!"
@@ -126,14 +129,6 @@ def log_history(u, act, count):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     run_query_safe('INSERT INTO history (username, action, count, timestamp, ip, device, city, country, lat, lon) VALUES (?,?,?,?,?,?,?,?,?,?)', 
                    (u, act, count, ts, ip, dev, city, country, 0, 0), is_write=True)
-
-# --- QUAN TRỌNG: ĐÃ THÊM LẠI HÀM NÀY ĐỂ SỬA LỖI NAME ERROR ---
-def get_submissions(u=None):
-    q = "SELECT * FROM submissions WHERE status='Active'"
-    p = []
-    if u and u != "Tất cả": q += " AND username=?"; p.append(u)
-    q += " ORDER BY id DESC"
-    return run_query_safe(q, tuple(p))
 
 def get_submissions_filter(user=None, start_date=None, end_date=None):
     query = "SELECT * FROM submissions WHERE status='Active'"
@@ -223,15 +218,15 @@ def resolve_link_logic(input_str):
     except Exception as e: return input_str, "Lỗi Code", str(e)
 
 # ==========================================
-# 4. GIAO DIỆN CHÍNH
+# 4. GIAO DIỆN CHÍNH (LAYOUT SIDEBAR TRÁI)
 # ==========================================
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 if 'username' not in st.session_state: st.session_state['username'] = ''
 if 'role' not in st.session_state: st.session_state['role'] = ''
 
-# --- LOGIN SCREEN ---
+# --- MÀN HÌNH ĐĂNG NHẬP ---
 if not st.session_state['logged_in']:
-    st.title("🔐 Đăng Nhập Hệ Thống")
+    st.title("🔐 Đăng Nhập Hệ Thống V14")
     c1, c2 = st.columns(2)
     with c1:
         u = st.text_input("Tài khoản")
@@ -243,15 +238,21 @@ if not st.session_state['logged_in']:
                 st.toast(f"Chào {u}!", icon="👋"); time.sleep(0.5); st.rerun()
             else: st.error("Sai tài khoản hoặc mật khẩu")
 
-# --- MAIN APP ---
+# --- MÀN HÌNH CHÍNH (SAU KHI LOGIN) ---
 else:
-    # --- SIDEBAR NAV ---
+    # ----------------------------------------------------
+    # SIDEBAR: CHỨA TOÀN BỘ 3 TAB CHỨC NĂNG
+    # ----------------------------------------------------
     with st.sidebar:
-        st.title("🛠️ MENU")
-        st.info(f"👤 **{st.session_state['username']}**\n\nQuyền: {st.session_state['role'].upper()}")
+        st.subheader("🛠️ MENU ĐIỀU KHIỂN")
+        st.info(f"👤 **{st.session_state['username']}** | {st.session_state['role'].upper()}")
         
-        menu_options = ["🚀 Tool Đổi Link", "📤 Nộp Báo Cáo", "📊 Thống Kê & Admin"]
-        selected_menu = st.radio("Chức năng:", menu_options)
+        # SỬ DỤNG RADIO ĐỂ CHUYỂN TAB Ở BÊN TRÁI
+        menu_options = ["🚀 Tool Đổi Link", "📤 Nộp Báo Cáo"]
+        if st.session_state['role'] == 'admin':
+            menu_options.append("👑 Quản Trị Viên") # Tab Admin riêng
+        
+        selected_menu = st.radio("Chọn chức năng:", menu_options)
         
         st.markdown("---")
         if st.button("🚪 Đăng Xuất"):
@@ -259,26 +260,27 @@ else:
             st.session_state['data'] = [] 
             st.rerun()
 
+    # ----------------------------------------------------
+    # NỘI DUNG CHÍNH (THAY ĐỔI THEO MENU SIDEBAR)
+    # ----------------------------------------------------
+
     # --- MENU 1: TOOL ĐỔI LINK ---
     if selected_menu == "🚀 Tool Đổi Link":
-        st.header("🚀 Công Cụ Xử Lý Link Facebook")
-        st.caption("Tự động lấy link Address Bar chuẩn, loại bỏ rác tracking.")
+        st.title("🚀 Tool Xử Lý Link Facebook")
         
-        file_in = st.file_uploader("📂 Tải lên file Excel/TXT (Nhiều dòng)", type=['xlsx', 'txt'])
-        txt_in = st.text_area("📝 Hoặc dán link vào đây (Mỗi dòng 1 link):", height=120)
-        
-        c1, c2 = st.columns([1, 1])
-        with c1: btn_run = st.button("▶ BẮT ĐẦU CHẠY", type="primary")
-        with c2: 
-            if st.button("🗑️ XÓA TẤT CẢ (RESET)", type="secondary"):
+        # Nút xóa nằm ngay trên cùng cho dễ thấy
+        col_act1, col_act2 = st.columns([3, 1])
+        with col_act2:
+            if st.button("🗑️ RESET TOÀN BỘ", type="secondary", help="Xóa sạch dữ liệu đang làm"):
                 st.session_state['data'] = []
                 st.session_state['in_type'] = None
-                st.toast("Đã xóa sạch dữ liệu!", icon="🗑️")
+                st.toast("Đã Reset sạch sẽ!", icon="🧹")
                 time.sleep(0.5); st.rerun()
 
-        if 'data' not in st.session_state: st.session_state['data'] = []
-
-        if btn_run:
+        file_in = st.file_uploader("📂 Tải lên Excel/TXT", type=['xlsx', 'txt'])
+        txt_in = st.text_area("📝 Hoặc dán link (Mỗi dòng 1 link):", height=150)
+        
+        if st.button("▶ BẮT ĐẦU CHẠY", type="primary"):
             in_lines = []
             st.session_state['in_type'] = 'manual'
             if file_in:
@@ -303,16 +305,17 @@ else:
                         except: res[idx] = {"Link Gốc": in_lines[idx], "Link Address Bar": "Lỗi", "ID": "Lỗi", "Note": "Lỗi"}
                         don+=1; prog.progress(don/tot); stt.text(f"Đang chạy... {don}/{tot}")
                 
-                st.session_state['data'] = res; st.toast("Hoàn thành!", icon="✅"); stt.empty()
+                st.session_state['data'] = res; st.toast("Xong!", icon="✅"); stt.empty()
             else:
-                st.warning("Vui lòng nhập dữ liệu!")
+                st.warning("Chưa có dữ liệu đầu vào!")
 
-        if st.session_state['data']:
+        if 'data' in st.session_state and st.session_state['data']:
             df_r = pd.DataFrame(st.session_state['data'])
-            st.write("### 📋 Kết Quả Xử Lý")
+            st.divider()
+            st.write("### 📋 Kết Quả")
             st.data_editor(df_r, column_config={"Link Address Bar": st.column_config.LinkColumn("Link Address Bar", display_text=None)}, use_container_width=True)
             
-            out = BytesIO(); fn = "ket_qua_facebook.xlsx"
+            out = BytesIO(); fn = "ket_qua.xlsx"
             if st.session_state.get('in_type') == 'file' and st.session_state.get('f_name', '').endswith('.xlsx'):
                 df_root = st.session_state['df_up']
                 df_root['Link Address Bar (New)'] = df_r['Link Address Bar']
@@ -322,107 +325,133 @@ else:
             else:
                 with pd.ExcelWriter(out, engine='xlsxwriter') as w: df_r.to_excel(w, index=False)
             
-            st.download_button("📥 TẢI FILE EXCEL KẾT QUẢ", out.getvalue(), fn, type="primary", use_container_width=True)
+            st.download_button("📥 TẢI EXCEL", out.getvalue(), fn, type="primary", use_container_width=True)
 
     # --- MENU 2: NỘP BÁO CÁO ---
     elif selected_menu == "📤 Nộp Báo Cáo":
-        st.header("📤 Nộp Báo Cáo Kết Quả")
+        st.title("📤 Nộp Báo Cáo")
         
+        # Phần user thường: Xem lịch sử của chính mình
+        st.subheader("Lịch sử hoạt động của bạn")
+        # Lấy thống kê KPI
+        h_data = get_history_filter(user=st.session_state['username'])
+        if h_data:
+            df_h = pd.DataFrame(h_data, columns=["User", "Action", "Count", "Time", "IP", "Dev", "City", "Country", "Lat", "Lon"])
+            total_kpi = df_h[df_h['Action'] == 'Chạy Tool']['Count'].sum()
+            st.metric("Tổng Link Đã Xử Lý (KPI)", total_kpi)
+        
+        st.divider()
+        st.write("### Gửi link báo cáo")
         with st.form("submit_form", clear_on_submit=True):
-            st.info("Dán link Google Sheet/Drive chứa kết quả vào đây.")
-            lnk = st.text_input("🔗 Link Báo Cáo:")
+            lnk = st.text_input("🔗 Link Google Sheet/Drive:")
             nte = st.text_input("📝 Ghi chú:")
-            if st.form_submit_button("Gửi Báo Cáo Ngay"):
+            if st.form_submit_button("Gửi Ngay"):
                 if "http" in lnk: 
                     submit_report(st.session_state['username'], lnk, nte)
-                    st.success("✅ Đã gửi báo cáo!"); time.sleep(1); st.rerun()
-                else: st.error("⚠️ Link không hợp lệ")
+                    st.success("✅ Đã gửi!"); time.sleep(1); st.rerun()
+                else: st.error("⚠️ Link sai định dạng")
 
-        st.subheader("🕒 Lịch sử nộp (Của bạn)")
-        # Sửa lại gọi hàm get_submissions_filter cho user view
+        # Lịch sử nộp
         mys = get_submissions_filter(user=st.session_state['username'])
         if mys:
+            st.write("### Các lần nộp gần đây")
             df_my = pd.DataFrame(mys, columns=["ID", "User", "Link", "Note", "Time", "IP", "Dev", "Loc", "Status"])
-            for idx, row in df_my.iterrows():
-                with st.container():
-                    c1, c2, c3 = st.columns([5, 2, 1])
-                    c1.markdown(f"📄 **[{row['Link']}]({row['Link']})**")
-                    c1.caption(f"Ghi chú: {row['Note']}")
-                    c2.text(f"🕒 {row['Time']}")
-                    if c3.button("Hoàn tác", key=f"del_{row['ID']}"):
-                        delete_submission(row['ID'])
-                        st.toast("Đã thu hồi!"); time.sleep(0.5); st.rerun()
-                    st.divider()
-        else: st.info("Chưa có lịch sử nộp.")
+            st.dataframe(df_my[["Time", "Link", "Note", "Status"]], use_container_width=True)
 
-    # --- MENU 3: ADMIN ---
-    elif selected_menu == "📊 Thống Kê & Admin":
-        curr_role = st.session_state['role']
-        if curr_role != 'admin':
-            st.warning("Bạn không có quyền truy cập trang này.")
-        else:
-            st.header("👑 Quản Trị Viên (Admin)")
-            tab_export, tab_users = st.tabs(["📥 XUẤT BÁO CÁO", "👥 QUẢN LÝ USER"])
+    # --- MENU 3: ADMIN CENTER (DÀNH RIÊNG CHO QTV) ---
+    elif selected_menu == "👑 Quản Trị Viên":
+        st.title("👑 Trung Tâm Quản Trị")
+        
+        # ĐÂY LÀ PHẦN BẠN YÊU CẦU: TAB RIÊNG CHO TỪNG CHỨC NĂNG
+        tab1, tab2, tab3 = st.tabs(["📊 THỐNG KÊ", "📥 XUẤT BÁO CÁO (EXCEL)", "👥 QUẢN LÝ USER"])
+        
+        # --- TAB 1: DASHBOARD ---
+        with tab1:
+            st.subheader("Tổng Quan Hệ Thống")
+            all_users = get_all_users()
+            total_users = len(all_users)
+            st.metric("Tổng Nhân Viên", total_users)
+            st.info("Dùng Tab 'Xuất Báo Cáo' để tải file chi tiết.")
+
+        # --- TAB 2: EXPORT EXCEL (THEO YÊU CẦU CỦA BẠN) ---
+        with tab2:
+            st.subheader("📥 Trích Xuất Dữ Liệu Ra Excel")
+            st.markdown("Chọn điều kiện bên dưới để tải file:")
             
-            with tab_export:
-                st.subheader("Trích Xuất Dữ Liệu")
-                with st.form("admin_export_form"):
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        all_u = get_all_users()
-                        u_list = ["Tất cả"] + [x[0] for x in all_u]
-                        target_u = st.selectbox("1. Nhân Viên:", u_list)
-                    with c2:
-                        d_range = st.date_input("2. Thời Gian:", [datetime.now() - timedelta(days=7), datetime.now()])
-                    with c3:
-                        data_type = st.selectbox("3. Loại Dữ Liệu:", ["Lịch sử Hoạt động (KPI)", "Danh sách Nộp Báo Cáo"])
-                    
-                    if st.form_submit_button("🚀 Xuất Excel"):
-                        if len(d_range) != 2: st.error("Chọn đủ ngày.")
+            with st.form("admin_export_form"):
+                col_a, col_b, col_c = st.columns(3)
+                
+                with col_a:
+                    st.markdown("**1. Chọn Người:**")
+                    all_u_raw = get_all_users()
+                    u_list = ["Tất cả"] + [x[0] for x in all_u_raw]
+                    target_u = st.selectbox("Nhân viên:", u_list)
+                
+                with col_b:
+                    st.markdown("**2. Chọn Ngày:**")
+                    d_range = st.date_input("Khoảng thời gian:", [datetime.now() - timedelta(days=7), datetime.now()])
+                
+                with col_c:
+                    st.markdown("**3. Loại Dữ Liệu:**")
+                    data_type = st.selectbox("Cần lấy gì?", ["Lịch sử KPI (Số lượng)", "Danh sách Nộp Báo Cáo"])
+                
+                btn_export = st.form_submit_button("🚀 TẠO FILE EXCEL")
+                
+                if btn_export:
+                    if len(d_range) != 2:
+                        st.error("Vui lòng chọn đủ ngày bắt đầu và kết thúc.")
+                    else:
+                        s_date, e_date = d_range
+                        out_file = BytesIO()
+                        f_name = f"Report_{s_date}_{e_date}.xlsx"
+                        has_data = False
+                        
+                        if data_type == "Danh sách Nộp Báo Cáo":
+                            raw = get_submissions_filter(target_u, s_date, e_date)
+                            if raw:
+                                df_ex = pd.DataFrame(raw, columns=["ID", "User", "Link", "Note", "Time", "IP", "Dev", "Loc", "Status"])
+                                with pd.ExcelWriter(out_file, engine='xlsxwriter') as w: df_ex.to_excel(w, index=False)
+                                has_data = True
+                        else: # KPI
+                            raw = get_history_filter(target_u, s_date, e_date)
+                            if raw:
+                                df_ex = pd.DataFrame(raw, columns=["User", "Action", "Count", "Time", "IP", "Dev", "City", "Country", "Lat", "Lon"])
+                                with pd.ExcelWriter(out_file, engine='xlsxwriter') as w: df_ex.to_excel(w, index=False)
+                                has_data = True
+                        
+                        if has_data:
+                            st.success("✅ Đã tạo file thành công!")
+                            st.download_button(f"⬇️ Tải xuống {f_name}", out_file.getvalue(), f_name)
                         else:
-                            s_date, e_date = d_range
-                            output_admin = BytesIO()
-                            file_name_admin = f"Report_{data_type}_{s_date}_{e_date}.xlsx"
-                            has_data = False
-                            
-                            if data_type == "Danh sách Nộp Báo Cáo":
-                                raw = get_submissions_filter(target_u, s_date, e_date)
-                                if raw:
-                                    df_ex = pd.DataFrame(raw, columns=["ID", "User", "Link", "Note", "Time", "IP", "Dev", "Loc", "Status"])
-                                    with pd.ExcelWriter(output_admin, engine='xlsxwriter') as w: df_ex.to_excel(w, index=False)
-                                    has_data = True
-                            else:
-                                raw = get_history_filter(target_u, s_date, e_date)
-                                if raw:
-                                    df_ex = pd.DataFrame(raw, columns=["User", "Action", "Count", "Time", "IP", "Dev", "City", "Country", "Lat", "Lon"])
-                                    with pd.ExcelWriter(output_admin, engine='xlsxwriter') as w: df_ex.to_excel(w, index=False)
-                                    has_data = True
-                            
-                            if has_data:
-                                st.success("✅ Thành công!")
-                                st.download_button(f"⬇️ Tải {file_name_admin}", output_admin.getvalue(), file_name_admin)
-                            else: st.warning("Không có dữ liệu.")
+                            st.warning("⚠️ Không có dữ liệu nào trong khoảng thời gian này.")
+
+        # --- TAB 3: USER MANAGEMENT ---
+        with tab3:
+            st.subheader("👥 Quản Lý Tài Khoản")
             
-            with tab_users:
-                st.subheader("Danh Sách User")
-                st.table(pd.DataFrame(all_u, columns=["Tên đăng nhập", "Quyền"]))
-                c_add, c_del = st.columns(2)
-                with c_add:
-                    st.write("➕ **Thêm Mới**")
-                    with st.form("add_user_f", clear_on_submit=True):
-                        nu = st.text_input("Username")
-                        np = st.text_input("Password", type="password")
-                        nr = st.selectbox("Role", ["user", "admin"])
-                        if st.form_submit_button("Tạo"):
+            c_add, c_del = st.columns(2)
+            with c_add:
+                with st.expander("➕ Thêm Nhân Viên Mới", expanded=True):
+                    with st.form("add_user_form", clear_on_submit=True):
+                        nu = st.text_input("Tên đăng nhập")
+                        np = st.text_input("Mật khẩu", type="password")
+                        nr = st.selectbox("Quyền hạn", ["user", "admin"])
+                        if st.form_submit_button("Tạo Tài Khoản"):
                             if nu and np:
                                 ok, m = add_user(nu, make_hashes(np), nr)
-                                if ok: st.success(f"Đã tạo {nu}"); time.sleep(1); st.rerun()
+                                if ok: st.success(f"Đã tạo: {nu}"); time.sleep(1); st.rerun()
                                 else: st.error(m)
                             else: st.warning("Điền đủ thông tin!")
-                with c_del:
-                    st.write("❌ **Xóa User**")
-                    with st.form("del_user_f"):
-                        du = st.selectbox("Chọn User", [x[0] for x in all_u])
+            
+            with c_del:
+                with st.expander("❌ Xóa Nhân Viên", expanded=True):
+                    all_users_list = [x[0] for x in get_all_users()]
+                    with st.form("del_user_form"):
+                        du = st.selectbox("Chọn người cần xóa:", all_users_list)
                         if st.form_submit_button("Xóa Vĩnh Viễn"):
                             delete_user_db(du)
                             st.success(f"Đã xóa {du}"); time.sleep(1); st.rerun()
+            
+            st.markdown("---")
+            st.write("### Danh sách hiện tại")
+            st.table(pd.DataFrame(get_all_users(), columns=["Username", "Role"]))
