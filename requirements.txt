@@ -1,5 +1,0 @@
-streamlit
-pandas
-requests
-xlsxwriter
-openpyxl
